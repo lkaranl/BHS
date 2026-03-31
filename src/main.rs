@@ -2,40 +2,34 @@ use macroquad::prelude::*;
 use std::collections::HashMap;
 
 const NODE_RADIUS: f32 = 45.0;
-const FONT_SIZE: u16 = 24;
-const SEARCH_INTERVAL: f32 = 2.0; // Segundos entre passos da animação
+
+const CLR_BG: Color = Color::new(0.04, 0.04, 0.08, 1.0);
+const CLR_NODE: Color = Color::new(0.12, 0.15, 0.25, 0.95);
+const CLR_HIGHLIGHT: Color = Color::new(1.0, 0.75, 0.0, 1.0);
+const CLR_ACCENT: Color = Color::new(0.2, 0.6, 1.0, 1.0);
+const CLR_SUCCESS: Color = Color::new(0.2, 0.9, 0.4, 1.0);
+const CLR_TEXT: Color = Color::new(0.95, 0.95, 1.0, 1.0);
 
 #[derive(Clone, Copy, PartialEq)]
-enum SearchPhase {
-    SearchingLocal,
-    TraversingUp,
-    FoundResult,
-}
+enum Lesson { None, Canary, Ostrich, Whale, Bat, Rex }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, PartialEq)]
+enum StepPhase { Analysing, ResultFail, Success }
+
 struct Node {
-    name: String,
     pos: Vec2,
-    property: Option<(&'static str, bool)>,
-    parent_name: Option<String>,
-}
-
-enum SearchState {
-    Idle,
-    Visualizing {
-        path: Vec<String>,
-        current_step: usize,
-        timer: f32,
-        found_at: Option<String>,
-        result: Option<bool>,
-        phase: SearchPhase,
-    },
+    properties: Vec<(&'static str, bool)>,
+    parent: Option<String>,
 }
 
 struct App {
     nodes: HashMap<String, Node>,
-    state: SearchState,
-    msg: String,
+    active_lesson: Lesson,
+    path: Vec<String>,
+    current_idx: usize,
+    phase: StepPhase,
+    log: Vec<String>,
+    target_prop: &'static str,
     initialized: bool,
 }
 
@@ -43,227 +37,185 @@ impl App {
     fn new() -> Self {
         Self {
             nodes: HashMap::new(),
-            state: SearchState::Idle,
-            msg: "Bem-vindo! Clique em 'Canário' ou 'Avestruz' para iniciar a aula.".to_string(),
+            active_lesson: Lesson::None,
+            path: Vec::new(),
+            current_idx: 0,
+            phase: StepPhase::Analysing,
+            log: Vec::new(),
+            target_prop: "",
             initialized: false,
         }
     }
 
-    fn init_nodes(&mut self) {
+    fn init(&mut self) {
         if self.initialized { return; }
-        
         let w = screen_width();
         let h = screen_height();
+        let off_y = h * 0.15;
+        let mut n = HashMap::new();
 
-        let mut nodes = HashMap::new();
-        
-        // Estrutura Semântica: Animal <- Pássaro <- (Canário, Avestruz)
-        nodes.insert("Animal".to_string(), Node {
-            name: "Animal".to_string(),
-            pos: vec2(w / 2.0, h * 0.15),
-            property: None,
-            parent_name: None,
-        });
+        n.insert("Vida".to_string(), Node { pos: vec2(w * 0.5, h * 0.1 + off_y), properties: vec![("respira", true)], parent: None });
+        n.insert("Ave".to_string(), Node { pos: vec2(w * 0.25, h * 0.3 + off_y), properties: vec![("voa", true)], parent: Some("Vida".to_string()) });
+        n.insert("Mamífero".to_string(), Node { pos: vec2(w * 0.75, h * 0.3 + off_y), properties: vec![("voa", false)], parent: Some("Vida".to_string()) });
+        n.insert("Canário".to_string(), Node { pos: vec2(w * 0.12, h * 0.5 + off_y), properties: vec![], parent: Some("Ave".to_string()) });
+        n.insert("Avestruz".to_string(), Node { pos: vec2(w * 0.38, h * 0.5 + off_y), properties: vec![("voa", false)], parent: Some("Ave".to_string()) });
+        n.insert("Morcego".to_string(), Node { pos: vec2(w * 0.62, h * 0.5 + off_y), properties: vec![("voa", true)], parent: Some("Mamífero".to_string()) });
+        n.insert("Baleia".to_string(), Node { pos: vec2(w * 0.88, h * 0.5 + off_y), properties: vec![], parent: Some("Mamífero".to_string()) });
+        n.insert("Rex (Cão)".to_string(), Node { pos: vec2(w * 0.8, h * 0.65 + off_y), properties: vec![], parent: Some("Mamífero".to_string()) });
 
-        nodes.insert("Pássaro".to_string(), Node {
-            name: "Pássaro".to_string(),
-            pos: vec2(w / 2.0, h * 0.4),
-            property: Some(("voa", true)),
-            parent_name: Some("Animal".to_string()),
-        });
-
-        nodes.insert("Canário".to_string(), Node {
-            name: "Canário".to_string(),
-            pos: vec2(w * 0.3, h * 0.7),
-            property: None, // Aqui acontece Herança
-            parent_name: Some("Pássaro".to_string()),
-        });
-
-        nodes.insert("Avestruz".to_string(), Node {
-            name: "Avestruz".to_string(),
-            pos: vec2(w * 0.7, h * 0.7),
-            property: Some(("voa", false)), // Aqui acontece Sobrescrita
-            parent_name: Some("Pássaro".to_string()),
-        });
-
-        self.nodes = nodes;
+        self.nodes = n;
         self.initialized = true;
     }
 
-    fn start_search(&mut self, start_node: &str) {
-        let mut path = Vec::new();
-        let mut current = start_node.to_string();
-        let mut result = None;
-        let mut found_at = None;
+    fn select_lesson(&mut self, lesson: Lesson) {
+        self.active_lesson = lesson;
+        self.current_idx = 0;
+        self.phase = StepPhase::Analysing;
+        self.log.clear();
+        
+        let (start, prop) = match lesson {
+            Lesson::Canary => ("Canário", "voa"),
+            Lesson::Ostrich => ("Avestruz", "voa"),
+            Lesson::Whale => ("Baleia", "voa"),
+            Lesson::Bat => ("Morcego", "voa"),
+            Lesson::Rex => ("Rex (Cão)", "respira"),
+            _ => ("", ""),
+        };
 
-        // Algoritmo de Busca Semântica Tradicional
+        if start == "" { return; }
+        self.target_prop = prop;
+        
+        let mut p = Vec::new();
+        let mut curr = start.to_string();
         loop {
-            path.push(current.clone());
-            if let Some(node) = self.nodes.get(&current) {
-                if let Some((prop, val)) = node.property {
-                    if prop == "voa" {
-                        result = Some(val);
-                        found_at = Some(current.clone());
-                        break;
+            p.push(curr.clone());
+            if let Some(node) = self.nodes.get(&curr) {
+                if node.properties.iter().any(|(k, _)| *k == prop) { break; }
+                if let Some(ref pa) = node.parent { curr = pa.clone(); } else { break; }
+            } else { break; }
+        }
+        self.path = p;
+        self.log.push(format!("OBJETIVO: Encontrar '{}' começando em {}", prop, start));
+        self.log.push(format!("-> Analisando nó: {}", start));
+    }
+
+    fn next_step(&mut self) {
+        if self.active_lesson == Lesson::None { return; }
+
+        match self.phase {
+            StepPhase::Analysing => {
+                let name = &self.path[self.current_idx];
+                if let Some(node) = self.nodes.get(name) {
+                    if let Some((_, val)) = node.properties.iter().find(|(k, _)| *k == self.target_prop) {
+                        self.log.insert(0, format!("! ACHEI ! '{}'={} em {}.", self.target_prop, val, name));
+                        self.phase = StepPhase::Success;
+                    } else {
+                        self.log.insert(0, format!("? Não tem '{}' em {}.", self.target_prop, name));
+                        self.phase = StepPhase::ResultFail;
                     }
                 }
-                if let Some(ref parent) = node.parent_name {
-                    current = parent.clone();
-                } else {
-                    break;
-                }
-            } else {
-                break;
             }
+            StepPhase::ResultFail => {
+                if self.current_idx < self.path.len() - 1 {
+                    self.current_idx += 1;
+                    let name = &self.path[self.current_idx];
+                    self.log.insert(0, format!("-> Subindo para o pai: {}", name));
+                    self.phase = StepPhase::Analysing;
+                } else {
+                    self.log.insert(0, "x FIM: Não encontrado em lugar nenhum.".to_string());
+                    self.phase = StepPhase::Success; // Só para parar
+                }
+            }
+            StepPhase::Success => {} // Nada a fazer
         }
-
-        self.state = SearchState::Visualizing {
-            path,
-            current_step: 0,
-            timer: 0.0,
-            found_at,
-            result,
-            phase: SearchPhase::SearchingLocal,
-        };
     }
 
     fn update(&mut self) {
-        self.init_nodes();
+        self.init();
+        if is_key_pressed(KeyCode::Key1) { self.select_lesson(Lesson::Canary); }
+        if is_key_pressed(KeyCode::Key2) { self.select_lesson(Lesson::Ostrich); }
+        if is_key_pressed(KeyCode::Key3) { self.select_lesson(Lesson::Whale); }
+        if is_key_pressed(KeyCode::Key4) { self.select_lesson(Lesson::Bat); }
+        if is_key_pressed(KeyCode::Key5) { self.select_lesson(Lesson::Rex); }
+        if is_key_pressed(KeyCode::Escape) { self.active_lesson = Lesson::None; }
+        if is_key_pressed(KeyCode::Space) { self.next_step(); }
 
         if is_mouse_button_pressed(MouseButton::Left) {
             let (mx, my) = mouse_position();
-            let m_vec = vec2(mx, my);
-            
-            let mut clicked = None;
-            for (name, node) in &self.nodes {
-                if m_vec.distance(node.pos) < NODE_RADIUS {
-                    clicked = Some(name.clone());
-                    break;
-                }
-            }
-
-            if let Some(name) = clicked {
-                if name == "Canário" || name == "Avestruz" {
-                    self.start_search(&name);
-                }
-            }
-        }
-
-        if let SearchState::Visualizing { 
-            ref path, 
-            ref mut current_step, 
-            ref mut timer, 
-            ref found_at, 
-            result, 
-            ref mut phase,
-        } = self.state {
-            *timer += get_frame_time();
-
-            let current_node_name = &path[*current_step];
-            let is_target = found_at.as_ref().map_or(false, |f| f == current_node_name);
-
-            if *timer > SEARCH_INTERVAL {
-                *timer = 0.0;
-                if is_target {
-                    *phase = SearchPhase::FoundResult;
-                    let res_str = if result.unwrap() { "TRUE (Voa)" } else { "FALSE (Não voa)" };
-                    self.msg = format!("PROFESSOR: Propriedade encontrada em {}! Resultado final: {}.", current_node_name, res_str);
-                } else if *current_step < path.len() - 1 {
-                    *current_step += 1;
-                    *phase = SearchPhase::TraversingUp;
-                }
-            } else {
-                match phase {
-                    SearchPhase::SearchingLocal => {
-                        self.msg = format!("IA: Verificando se o nó '{}' possui a propriedade 'voa'...", current_node_name);
-                    }
-                    SearchPhase::TraversingUp => {
-                        self.msg = format!("PROFESSOR: {} não possui 'voa'. Subindo via herança...", path[*current_step - 1]);
-                    }
-                    SearchPhase::FoundResult => {}
-                }
+            if mx > screen_width() - 220.0 && my > screen_height() - ph_h() - 100.0 && my < screen_height() - ph_h() {
+                self.next_step();
             }
         }
     }
 
     fn draw(&self) {
-        clear_background(Color::from_rgba(15, 15, 25, 255));
+        clear_background(CLR_BG);
 
-        // Gradiente de fundo
-        draw_circle(screen_width()/2.0, screen_height()/2.0, screen_width(), Color::from_rgba(25, 25, 50, 255));
-
-        // 1. Desenhar Arestas (IS-A)
-        for node in self.nodes.values() {
-            if let Some(ref parent_name) = node.parent_name {
-                if let Some(parent) = self.nodes.get(parent_name) {
-                    draw_line(node.pos.x, node.pos.y, parent.pos.x, parent.pos.y, 4.0, Color::from_rgba(80, 100, 200, 150));
-                    let mid = (node.pos + parent.pos) / 2.0;
-                    draw_text("is-a", mid.x + 10.0, mid.y, 18.0, DARKGRAY);
+        for (name, node) in &self.nodes {
+            if let Some(ref p_name) = node.parent {
+                if let Some(parent) = self.nodes.get(p_name) {
+                    let active = self.active_lesson != Lesson::None && self.path.contains(name) && self.path.contains(p_name);
+                    draw_line(node.pos.x, node.pos.y, parent.pos.x, parent.pos.y, 2.0, if active { CLR_HIGHLIGHT } else { Color::new(0.2,0.2,0.3,0.7) });
                 }
             }
         }
 
-        // 2. Desenhar Nós
-        for node in self.nodes.values() {
-            let mut is_active = false;
-            let mut is_target_found = false;
-
-            if let SearchState::Visualizing { ref path, current_step, found_at: ref _found_at, phase, .. } = self.state {
-                if path[current_step] == node.name {
-                    is_active = true;
-                    if phase == SearchPhase::FoundResult {
-                        is_target_found = true;
-                    }
-                }
+        for (name, node) in &self.nodes {
+            let focus = self.active_lesson != Lesson::None && self.path.get(self.current_idx) == Some(&name.to_string());
+            draw_circle(node.pos.x, node.pos.y, NODE_RADIUS, if focus { CLR_HIGHLIGHT } else { CLR_NODE });
+            draw_circle_lines(node.pos.x, node.pos.y, NODE_RADIUS, 2.0, WHITE);
+            let t_sz = measure_text(name, None, 18, 1.0);
+            draw_text(name, node.pos.x - t_sz.width/2.0, node.pos.y + 6.0, 18.0, CLR_TEXT);
+            let mut py = node.pos.y + NODE_RADIUS + 20.0;
+            for (p, v) in &node.properties {
+                draw_text(&format!("{}:{}", p, if *v { "S" } else { "N" }), node.pos.x - 20.0, py, 14.0, if *v { GREEN } else { RED });
+                py += 15.0;
             }
+        }
 
-            let base_color = if is_target_found { GREEN } else if is_active { GOLD } else { DARKBLUE };
+        let log_w = 560.0;
+        let log_h = 110.0;
+        let log_x = (screen_width() - log_w) / 2.0;
+        let log_y = 15.0;
+        draw_rectangle(log_x, log_y, log_w, log_h, Color::new(0.0, 0.0, 0.1, 0.95));
+        draw_rectangle_lines(log_x, log_y, log_w, log_h, 2.0, CLR_ACCENT);
+        draw_text("PASSO A PASSO DA IA:", log_x + 15.0, log_y + 25.0, 18.0, CLR_HIGHLIGHT);
+        let mut ly = log_y + 50.0;
+        for msg in self.log.iter().take(3) {
+            let c = if msg.contains("ACHEI") { CLR_SUCCESS } else if msg.contains("Não tem") { GRAY } else { WHITE };
+            draw_text(msg, log_x + 15.0, ly, 16.0, c);
+            ly += 20.0;
+        }
+
+        if self.active_lesson != Lesson::None && self.phase != StepPhase::Success {
+            let btn_x = screen_width() - 200.0;
+            let btn_y = screen_height() - ph_h() - 90.0;
+            draw_rectangle(btn_x, btn_y, 180.0, 60.0, CLR_ACCENT);
+            draw_rectangle_lines(btn_x, btn_y, 180.0, 60.0, 2.0, WHITE);
+            draw_text("PRÓXIMO", btn_x + 40.0, btn_y + 38.0, 22.0, WHITE);
             
-            if is_active {
-                draw_circle(node.pos.x, node.pos.y, NODE_RADIUS + 8.0, Color::from_rgba(255, 255, 215, 50));
-            }
-
-            draw_circle(node.pos.x, node.pos.y, NODE_RADIUS, base_color);
-            draw_circle_lines(node.pos.x, node.pos.y, NODE_RADIUS, 3.0, WHITE);
-
-            let t_measure = measure_text(&node.name, None, FONT_SIZE, 1.0);
-            draw_text(&node.name, node.pos.x - t_measure.width/2.0, node.pos.y + 5.0, FONT_SIZE as f32, WHITE);
-
-            if let Some((p, v)) = node.property {
-                let color = if v { SKYBLUE } else { ORANGE };
-                draw_text(&format!("{}: {}", p, v), node.pos.x - 30.0, node.pos.y + NODE_RADIUS + 25.0, 18.0, color);
-            }
+            let tut = match self.phase {
+                StepPhase::Analysing => "AIA: Clique para VERIFICAR se o nó tem a característica.",
+                StepPhase::ResultFail => "AIA: Não encontrado aqui! Clique para SUBIR para o pai.",
+                _ => "",
+            };
+            draw_text(tut, 30.0, btn_y + 35.0, 18.0, YELLOW);
         }
 
-        // 3. Cursor de Busca Animado
-        if let SearchState::Visualizing { ref path, current_step, timer, phase, .. } = self.state {
-            if phase != SearchPhase::FoundResult {
-                let node = &self.nodes[&path[current_step]];
-                let pulse = (timer * 5.0).sin() * 5.0;
-                draw_circle_lines(node.pos.x, node.pos.y, NODE_RADIUS + 12.0 + pulse, 5.0, YELLOW);
-            }
+        let ph = ph_h();
+        draw_rectangle(0.0, screen_height() - ph, screen_width(), ph, Color::new(0.0, 0.0, 0.0, 1.0));
+        let mut ix = 20.0;
+        for itm in ["[1] Canário", "[2] Avestruz", "[3] Baleia", "[4] Morcego", "[5] Rex", "[ESC]"] {
+            draw_text(itm, ix, screen_height() - 20.0, 16.0, CLR_ACCENT);
+            ix += screen_width() / 6.0;
         }
-
-        // 4. Painel Educativo (Legendas Dinâmicas)
-        let rect_h = 100.0;
-        draw_rectangle(20.0, screen_height() - rect_h - 20.0, screen_width() - 40.0, rect_h, Color::from_rgba(0, 0, 0, 220));
-        draw_rectangle_lines(20.0, screen_height() - rect_h - 20.0, screen_width() - 40.0, rect_h, 2.0, GRAY);
-        
-        draw_text("AULA DE IA - NARRATIVA DO ALGORITMO:", 40.0, screen_height() - rect_h, 18.0, GOLD);
-        draw_text(&self.msg, 40.0, screen_height() - 50.0, 22.0, WHITE);
-
-        // Header
-        draw_text("Simulador de Herança e Sobrescrita", 30.0, 50.0, 32.0, WHITE);
-        draw_text("Clique em um nó folha para iniciar a busca", 30.0, 80.0, 18.0, LIGHTGRAY);
     }
 }
 
-#[macroquad::main("AI Search Simulator")]
+fn ph_h() -> f32 { 45.0 }
+
+#[macroquad::main("IA Semantic Search - Granular Mode")]
 async fn main() {
     let mut app = App::new();
-    loop {
-        app.update();
-        app.draw();
-        next_frame().await
-    }
+    loop { app.update(); app.draw(); next_frame().await }
 }
